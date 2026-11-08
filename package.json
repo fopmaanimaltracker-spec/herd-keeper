@@ -1,0 +1,59 @@
+{
+  "name": "herdkeeper",
+  "version": "1.0.0",
+  "description": "HerdKeeper Livestock Management System",
+  "main": "main.js",
+  "author": "HerdKeeper",
+  "license": "UNLICENSED",
+  "scripts": {
+    "start": "electron .",
+    "dist:win": "electron-builder --win nsis portable"
+  },
+  "devDependencies": {
+    "electron": "^36.3.2",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.herdkeeper.desktop",
+    "productName": "HerdKeeper",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "app/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "HerdKeeper"
+    },
+    "portable": {
+      "artifactName": "HerdKeeper-Portable-${version}.${ext}"
+    },
+    "publish": null
+  }
+}

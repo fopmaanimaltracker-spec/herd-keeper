@@ -1,0 +1,1 @@
+'use strict';\n// Deliberately no Node.js APIs are exposed to the livestock records page.\n

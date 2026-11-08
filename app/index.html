@@ -1487,6 +1487,9 @@ body::before, body::after {
             <button class="menu-drop-btn">File ▾</button>
             <div class="dropdown-content">
                 <button onclick="downloadBackupJson()">Export JSON Backup</button>
+                <button type="button" onclick="hkDriveSetup()">Connect Google Drive</button>
+                <button type="button" onclick="hkDriveUpload()">Upload Backup to Google Drive</button>
+                <button type="button" onclick="hkDriveDownload()">Download Latest from Google Drive</button>
                 <button onclick="exportToGoogleSheetsCSV()">Export Spreadsheet CSV</button>
                 <button onclick="openDeadAnimals()">View Dead Animals</button><button id="open-sold-animals-menu" onclick="openSoldAnimals()">View Sold Animals</button>
                 <button type="button" onclick="openPedigreeViewer()">View Pedigree</button>
@@ -3111,8 +3114,11 @@ body::before, body::after {
         }
     }
 
-    function logout() {
+    async function logout() {
         if (!confirm('Are you sure you want to sign out?')) return;
+        if (typeof hkDriveUpload === 'function' && localStorage.getItem('herdkeeperDriveWebAppUrl_v1')) {
+            try { await hkDriveUpload({ quiet: true }); } catch (e) { console.warn('Google Drive sign-out sync failed:', e); }
+        }
         document.getElementById('login-pass').value = '';
         document.getElementById('login-error').classList.add('hidden');
         document.getElementById('app-workspace').classList.add('hidden');
@@ -3759,7 +3765,184 @@ table.list td{word-break:break-word}
     <tbody>${healthHtml}</tbody>
   </table>
   <div class="foot">HerdKeeper</div>
-</main></body></html>`);
+</main><script id="herdkeeper-google-drive-sync-update">
+/* HerdKeeper Google Drive sync add-on. This stores ONE JSON data backup in the owner's Drive.
+   It does not replace or rewrite the HerdKeeper application source file. */
+(function () {
+  'use strict';
+  const URL_KEY = 'herdkeeperDriveWebAppUrl_v1';
+  const TOKEN_KEY = 'herdkeeperDriveToken_v1';
+  const LAST_SIG_KEY = 'herdkeeperDriveLastSignature_v1';
+  const LAST_REMOTE_KEY = 'herdkeeperDriveLastRemoteSavedAt_v1';
+  let busy = false;
+  let timerStarted = false;
+
+  function status(message) {
+    const el = document.getElementById('autosave-status');
+    if (el) el.textContent = 'Local auto-save: ON · Google Drive: ' + message;
+  }
+  function cfg() {
+    return { url: localStorage.getItem(URL_KEY) || '', token: localStorage.getItem(TOKEN_KEY) || '' };
+  }
+  function dataSnapshot() {
+    return {
+      app: 'HerdKeeper', version: 1,
+      currentCategory: typeof currentCategory !== 'undefined' ? currentCategory : 'Goat',
+      animals: typeof animals !== 'undefined' ? animals : [],
+      healthRecords: typeof healthRecords !== 'undefined' ? healthRecords : [],
+      breedingRecords: typeof breedingRecords !== 'undefined' ? breedingRecords : [],
+      customGroups: typeof customGroups !== 'undefined' ? customGroups : [],
+      historyLogs: typeof historyLogs !== 'undefined' ? historyLogs : []
+    };
+  }
+  function signature(data) { return JSON.stringify(data); }
+  function makePayload() {
+    return Object.assign(dataSnapshot(), { savedAt: new Date().toISOString() });
+  }
+  function jsonpGet() {
+    const c = cfg();
+    if (!c.url || !c.token) return Promise.reject(new Error('Connect Google Drive first.'));
+    return new Promise((resolve, reject) => {
+      const callback = '__hkDriveCallback_' + Date.now() + '_' + Math.floor(Math.random() * 100000);
+      const script = document.createElement('script');
+      let finished = false;
+      const cleanup = () => { if (script.parentNode) script.parentNode.removeChild(script); try { delete window[callback]; } catch (_) { window[callback] = undefined; } };
+      const timeout = setTimeout(() => { if (finished) return; finished = true; cleanup(); reject(new Error('Google Drive did not respond. Check the Web App URL and internet connection.')); }, 15000);
+      window[callback] = result => { if (finished) return; finished = true; clearTimeout(timeout); cleanup(); if (result && result.ok) resolve(result); else reject(new Error((result && result.error) || 'Google Drive returned an error.')); };
+      script.onerror = () => { if (finished) return; finished = true; clearTimeout(timeout); cleanup(); reject(new Error('Could not reach the Google Drive sync service.')); };
+      const separator = c.url.includes('?') ? '&' : '?';
+      script.src = c.url + separator + 'action=read&token=' + encodeURIComponent(c.token) + '&callback=' + encodeURIComponent(callback) + '&_=' + Date.now();
+      document.head.appendChild(script);
+    });
+  }
+  async function postPayload(payload) {
+    const c = cfg();
+    if (!c.url || !c.token) throw new Error('Connect Google Drive first.');
+    const body = Object.assign({}, payload, { token: c.token });
+    // Apps Script accepts a text/plain JSON POST; no CORS response access is needed.
+    await fetch(c.url, { method: 'POST', mode: 'no-cors', cache: 'no-store', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(body) });
+    // Verify by reading back the saved timestamp. This prevents reporting success just because
+    // the browser accepted a no-cors request.
+    await new Promise(r => setTimeout(r, 1200));
+    const check = await jsonpGet();
+    if (!check.exists || !check.data || check.data.savedAt !== payload.savedAt) throw new Error('Google Drive did not confirm the uploaded backup.');
+    localStorage.setItem(LAST_SIG_KEY, signature(dataSnapshot()));
+    localStorage.setItem(LAST_REMOTE_KEY, check.data.savedAt);
+    status('Synced at ' + new Date().toLocaleTimeString());
+    return true;
+  }
+  function applyRemote(payload) {
+    if (!payload || payload.app !== 'HerdKeeper' || !Array.isArray(payload.animals)) throw new Error('The Google Drive file is not a valid HerdKeeper backup.');
+    animals = payload.animals || [];
+    healthRecords = payload.healthRecords || [];
+    breedingRecords = payload.breedingRecords || [];
+    customGroups = payload.customGroups || [];
+    historyLogs = payload.historyLogs || [];
+    if (typeof currentCategory !== 'undefined') currentCategory = payload.currentCategory || 'Goat';
+    if (typeof saveFopmaLocalData === 'function') saveFopmaLocalData();
+    if (typeof refreshDropdowns === 'function') refreshDropdowns();
+    if (typeof updateCategoryUI === 'function') updateCategoryUI();
+    if (typeof renderTable === 'function') renderTable();
+    if (typeof renderHealthTable === 'function') renderHealthTable();
+    if (typeof renderBreedingTable === 'function') renderBreedingTable();
+    if (typeof renderGroupsTable === 'function') renderGroupsTable();
+    localStorage.setItem(LAST_SIG_KEY, signature(dataSnapshot()));
+    localStorage.setItem(LAST_REMOTE_KEY, payload.savedAt || new Date().toISOString());
+    status('Downloaded latest backup');
+  }
+  window.hkDriveSetup = async function () {
+    const old = cfg();
+    const url = prompt('Paste your Google Apps Script Web App URL (ends in /exec):', old.url);
+    if (url === null) return;
+    const token = prompt('Enter the private sync token you added in Apps Script Project Settings:', old.token);
+    if (token === null) return;
+    if (!/^https:\/\/script\.google\.com\/macros\/s\/.+\/exec(?:\?.*)?$/.test(url.trim()) || token.trim().length < 20) {
+      alert('Check the Web App URL and use a private token at least 20 characters long.'); return;
+    }
+    localStorage.setItem(URL_KEY, url.trim());
+    localStorage.setItem(TOKEN_KEY, token.trim());
+    try {
+      const remote = await jsonpGet();
+      if (remote.exists && remote.data) {
+        const download = confirm('A HerdKeeper backup already exists in Google Drive.\n\nPress OK to download it to this device. Press Cancel to upload this device’s current records instead.');
+        if (download) applyRemote(remote.data);
+        else await postPayload(makePayload());
+      } else {
+        await postPayload(makePayload());
+      }
+      startAutoSync();
+      alert('Google Drive is connected. This device is now synced.');
+    } catch (e) {
+      localStorage.removeItem(URL_KEY); localStorage.removeItem(TOKEN_KEY);
+      status('Connection failed'); alert('Google Drive connection failed: ' + e.message + '\nCheck the Web App deployment and token, then try again.');
+    }
+  };
+  window.hkDriveUpload = async function (options) {
+    options = options || {};
+    if (busy) return false;
+    if (!cfg().url || !cfg().token) { if (!options.quiet) alert('Choose File → Connect Google Drive first.'); return false; }
+    busy = true; status('Uploading…');
+    try { await postPayload(makePayload()); if (!options.quiet) alert('HerdKeeper backup uploaded and verified in Google Drive.'); return true; }
+    catch (e) { status('Upload failed'); if (!options.quiet) alert('Upload failed: ' + e.message); throw e; }
+    finally { busy = false; }
+  };
+  window.hkDriveDownload = async function () {
+    if (busy) return;
+    if (!cfg().url || !cfg().token) { alert('Choose File → Connect Google Drive first.'); return; }
+    if (!confirm('Download the latest Google Drive backup and replace the records on this device?')) return;
+    busy = true; status('Downloading…');
+    try { const remote = await jsonpGet(); if (!remote.exists || !remote.data) throw new Error('There is no HerdKeeper backup in your Google Drive folder yet.'); applyRemote(remote.data); alert('Latest Google Drive backup downloaded.'); }
+    catch (e) { status('Download failed'); alert('Download failed: ' + e.message); }
+    finally { busy = false; }
+  };
+  async function pollSync() {
+    if (busy || !cfg().url || !document.getElementById('app-workspace') || document.getElementById('app-workspace').classList.contains('hidden')) return;
+    busy = true;
+    try {
+      const remote = await jsonpGet();
+      if (!remote.exists || !remote.data) return;
+      const localSig = signature(dataSnapshot());
+      const lastSig = localStorage.getItem(LAST_SIG_KEY) || '';
+      const lastRemote = localStorage.getItem(LAST_REMOTE_KEY) || '';
+      const remoteChanged = remote.data.savedAt && remote.data.savedAt !== lastRemote;
+      const localChanged = lastSig && localSig !== lastSig;
+      if (remoteChanged && !localChanged) applyRemote(remote.data);
+      else if (localChanged && !remoteChanged) await postPayload(makePayload());
+      else if (remoteChanged && localChanged) {
+        const takeCloud = confirm('HerdKeeper changed on this device and another device.\n\nPress OK to download the other device’s latest backup. Press Cancel to upload this device’s records.');
+        if (takeCloud) applyRemote(remote.data); else await postPayload(makePayload());
+      }
+    } catch (e) { console.warn('HerdKeeper Google Drive auto-sync:', e); status('Waiting for connection'); }
+    finally { busy = false; }
+  }
+  function startAutoSync() {
+    if (timerStarted) return; timerStarted = true;
+    setInterval(pollSync, 30000);
+  }
+  // Existing devices auto-check the shared Drive backup after a successful login.
+  const originalLogin = window.attemptLogin;
+  if (typeof originalLogin === 'function') {
+    window.attemptLogin = function () {
+      const result = originalLogin.apply(this, arguments);
+      if (cfg().url && !document.getElementById('app-workspace').classList.contains('hidden')) {
+        startAutoSync(); setTimeout(pollSync, 700);
+      }
+      return result;
+    };
+  }
+  // Exit-time best effort; periodic sync and awaited sign-out are the reliable paths.
+  window.addEventListener('beforeunload', function () {
+    if (!cfg().url || !cfg().token) return;
+    try {
+      const payload = Object.assign(makePayload(), { token: cfg().token });
+      navigator.sendBeacon(cfg().url, new Blob([JSON.stringify(payload)], { type: 'text/plain;charset=utf-8' }));
+    } catch (e) { console.warn('HerdKeeper exit backup could not be queued:', e); }
+  });
+  if (cfg().url && cfg().token) startAutoSync();
+  if (!cfg().url) status('Not connected');
+})();
+</script>
+</body></html>`);
         preview.document.close();
         preview.focus();
     }
